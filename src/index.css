@@ -1,0 +1,64 @@
+:root {
+  /* These are defaults. They get overwritten by JS injecting themes */
+  --bg-color: #050510;
+  --surface-color: #0b0c15;
+  --panel-border: rgba(50, 60, 100, 0.4);
+  --text-main: #e0e5ff;
+  --text-muted: #6b7280;
+
+  --accent-cyan: #00f0ff;
+  --accent-magenta: #ff003c;
+  --accent-green: #00ff88;
+  --accent-yellow: #f0e68c;
+
+  --font-mono: 'SF Mono', 'Fira Code', 'Roboto Mono', 'Courier New', monospace;
+  --font-sans: 'Inter', -apple-system, sans-serif;
+
+  --radius: 4px;
+  --shadow-glow: 0 0 10px rgba(0, 240, 255, 0.2);
+  --ticket-bg: rgba(0, 0, 0, 0.5);
+  --ball-bg: #ffffff;
+  --ball-border: #ffffff;
+  --ball-color: #000000;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-color);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+::selection {
+  background-color: var(--accent-magenta);
+  color: white;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-color);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--panel-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-cyan);
+}
