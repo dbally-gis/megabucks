@@ -406,9 +406,15 @@ export default function App() {
               <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>M</span>
             </div>
             {jackpotMillions > 0 && (
-              <div style={{ marginTop: '8px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: evColor, padding: '4px 8px', border: `1px solid ${evColor}`, borderRadius: '4px', display: 'inline-block' }}>
-                {evLabel} · ${currentEV.toFixed(2)}/ticket
-              </div>
+              <Tooltip text={
+                currentEV >= 0
+                  ? `At this jackpot you'd expect to get back more than you paid — on average $${(currentEV + GAME_CONFIGS[activeGame].ticketCost).toFixed(2)} per $${GAME_CONFIGS[activeGame].ticketCost} ticket. Still a long shot, but mathematically the best time to play.`
+                  : `On average you'd lose $${Math.abs(currentEV).toFixed(2)} of every $${GAME_CONFIGS[activeGame].ticketCost} ticket. For example: if a million people each buy one ticket, the average person walks away with $${(GAME_CONFIGS[activeGame].ticketCost + currentEV).toFixed(2)}. The jackpot needs to be much larger for the math to flip.`
+              }>
+                <div style={{ marginTop: '8px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: evColor, padding: '4px 8px', border: `1px solid ${evColor}`, borderRadius: '4px', display: 'inline-block', cursor: 'help' }}>
+                  {evLabel} · ${currentEV.toFixed(2)}/ticket ⓘ
+                </div>
+              </Tooltip>
             )}
             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '4px', lineHeight: 1.4 }}>
               Lump sum · 37% fed tax · TX resident (approx.)
