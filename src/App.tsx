@@ -543,13 +543,19 @@ export default function App() {
               {analysis && (
                 <div className="panel-section" style={{ marginTop: '16px' }}>
                   <div className="panel-title">Historical Frequency (Informational Only)</div>
+                  <div style={{ display: 'flex', gap: '16px', fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '10px', alignItems: 'center' }}>
+                    <span>Each box = one number (1–{GAME_CONFIGS[activeGame].maxPrimary}).</span>
+                    <span style={{ color: 'var(--accent-yellow)' }}>■ drawn above average</span>
+                    <span style={{ color: 'var(--accent-green)' }}>■ drawn below average</span>
+                    <span style={{ opacity: 0.4 }}>■ near average</span>
+                  </div>
                   <div className="heatmap">
                     {[...analysis.all].sort((a, b) => a.num - b.num).map(a => {
                       let cellClass = 'heat-cell';
                       if (a.variance > 3) cellClass += ' hot';
                       else if (a.variance < -3) cellClass += ' cold';
                       return (
-                        <div key={a.num} className={cellClass} title={`Drawn ${a.count}x · Variance: ${a.variance.toFixed(2)}`}>
+                        <div key={a.num} className={cellClass} title={`#${a.num} — drawn ${a.count}x (expected ${a.expected.toFixed(1)}x) · variance ${a.variance > 0 ? '+' : ''}${a.variance.toFixed(1)}`}>
                           {a.num}
                         </div>
                       );
