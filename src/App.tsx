@@ -4,33 +4,47 @@ import { themes } from './themes';
 import type { Theme } from './themes';
 import './App.css';
 
-// --- Types ---
-type GameType = 'powerball' | 'megamillions';
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type GameType = 'powerball' | 'megamillions' | 'texaslotto';
 
 interface DrawRecord {
   draw_date: string;
-  winning_numbers: string;
-  multiplier?: string;
+  winning_numbers: string; // space-separated primary balls only
   mega_ball?: string;
+  multiplier?: string;
+}
+
+interface GameConfig {
+  maxPrimary: number;
+  maxSpecial: number | null;
+  ballCount: number;
+  upperRangeMin: number;
+  csvPath: string;
+  csvGameFilter: string;
+  ticketCost: number;
+  totalCombinations: number;
+  smallPrizeEV: number;
+  label: string;
 }
 
 interface AnalyzedNumber {
   num: number;
   count: number;
   expected: number;
-  variance: number; // positive = hot, negative = cold
+  variance: number;
 }
 
 interface PickJustification {
   num: number;
-  tag: 'theory' | 'chaos' | 'hot' | 'cold';
+  tag: 'theory' | 'chaos';
   reason: string;
 }
 
 interface GeneratedPick {
-  id: string; // Add an ID for mapping multiple
+  id: string;
   primary: number[];
-  special: number;
+  special: number | null;
   justifications: PickJustification[];
 }
 
@@ -41,38 +55,32 @@ interface GenerationSession {
   picks: GeneratedPick[];
 }
 
-// --- Components ---
-const Tooltip = ({ text, children }: { text: string, children: React.ReactNode }) => (
-  <span className="tooltip-container">
-    {children}
-    <span className="tooltip-text">{text}</span>
-  </span>
-);
+// ─── Game Config ──────────────────────────────────────────────────────────────
 
-// --- Algorithm Constants ---
-const PB_MAX = 69;
-const PB_SPECIAL_MAX = 26;
-const MM_MAX = 70;
-const MM_SPECIAL_MAX = 25;
-const HUMAN_BIRTHDAY_CUTOFF = 31; // Humans heavily favor 1-31
+const GAME_CONFIGS: Record<GameType, GameConfig> = {
+  powerball: {
+    maxPrimary: 69, maxSpecial: 26, ballCount: 5, upperRangeMin: 32,
+    csvPath: '/api/texas/export/sites/lottery/Games/Powerball/Winning_Numbers/powerball.csv',
+    csvGameFilter: 'powerball',
+    ticketCost: 2, totalCombinations: 292_201_338, smallPrizeEV: 0.32, label: 'POWERBALL',
+  },
+  megamillions: {
+    maxPrimary: 70, maxSpecial: 25, ballCount: 5, upperRangeMin: 32,
+    csvPath: '/api/texas/export/sites/lottery/Games/Mega_Millions/Winning_Numbers/megamillions.csv',
+    csvGameFilter: 'mega millions',
+    ticketCost: 2, totalCombinations: 302_575_350, smallPrizeEV: 0.32, label: 'MEGA MILLIONS',
+  },
+  texaslotto: {
+    maxPrimary: 54, maxSpecial: null, ballCount: 6, upperRangeMin: 32,
+    csvPath: '/api/texas/export/sites/lottery/Games/Lotto_Texas/Winning_Numbers/lottotexas.csv',
+    csvGameFilter: 'lotto texas',
+    ticketCost: 1, totalCombinations: 25_827_165, smallPrizeEV: 0.12, label: 'TX LOTTO',
+  },
+};
 
-// Helper pseudo-random from string seed
-const cyrb128 = (str: string) => {
-  let h1 = 1779033703, h2 = 3144134277, h3 = 1013904242, h4 = 2773480762;
-  for (let i = 0, k; i < str.length; i++) {
-    k = str.charCodeAt(i);
-    h1 = h2 ^ Math.imul(h1 ^ k, 597399067);
-    h2 = h3 ^ Math.imul(h2 ^ k, 2869860233);
-    h3 = h4 ^ Math.imul(h3 ^ k, 951274213);
-    h4 = h1 ^ Math.imul(h4 ^ k, 2716044179);
-  }
-  h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067);
-  h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233);
-  h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213);
-  h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
-  h1 ^= (h2 ^ h3 ^ h4), h2 ^= h1, h3 ^= h1, h4 ^= h1;
-  return [h1 >>> 0, h2 >>> 0, h3 >>> 0, h4 >>> 0];
-}
+const HUMAN_BIRTHDAY_CUTOFF = 31;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const sfc32 = (a: number, b: number, c: number, d: number) => {
   return function () {
@@ -85,8 +93,40 @@ const sfc32 = (a: number, b: number, c: number, d: number) => {
     t = t + d | 0;
     c = c + t | 0;
     return (t >>> 0) / 4294967296;
-  }
-}
+  };
+};
+
+const makeCryptoRand = () => {
+  const buf = new Uint32Array(4);
+  crypto.getRandomValues(buf);
+  return {
+    rand: sfc32(buf[0], buf[1], buf[2], buf[3]),
+    entropyHex: Array.from(buf)
+      .map(n => n.toString(16).padStart(8, '0'))
+      .join('')
+      .substring(0, 16)
+      .toUpperCase(),
+  };
+};
+
+// EV = lump-sum jackpot after 37% fed tax / total combinations + small-prize EV − ticket cost
+// (lump sum ≈ 60% of advertised; Texas has no state income tax)
+const computeEV = (jackpotMillions: number, game: GameType): number => {
+  const cfg = GAME_CONFIGS[game];
+  const afterTax = jackpotMillions * 1_000_000 * 0.60 * 0.63;
+  return afterTax / cfg.totalCombinations + cfg.smallPrizeEV - cfg.ticketCost;
+};
+
+// ─── Components ───────────────────────────────────────────────────────────────
+
+const Tooltip = ({ text, children }: { text: string; children: React.ReactNode }) => (
+  <span className="tooltip-container">
+    {children}
+    <span className="tooltip-text">{text}</span>
+  </span>
+);
+
+// ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [activeGame, setActiveGame] = useState<GameType>('megamillions');
@@ -97,16 +137,23 @@ export default function App() {
 
   const [rawData, setRawData] = useState<DrawRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-
   const [currentSession, setCurrentSession] = useState<GenerationSession | null>(null);
 
-  // Apply Theme CSS Variables to Root & Inject Google Font
+  const [jackpots, setJackpots] = useState<Record<GameType, string>>({
+    powerball: '', megamillions: '', texaslotto: '',
+  });
+
+  const [savedSessions, setSavedSessions] = useState<GenerationSession[]>(() => {
+    try {
+      const s = localStorage.getItem('megabucks_sessions');
+      return s ? JSON.parse(s) : [];
+    } catch { return []; }
+  });
+
+  // Apply theme CSS variables
   useEffect(() => {
     const root = document.documentElement;
-    Object.entries(activeTheme.vars).forEach(([key, value]) => {
-      root.style.setProperty(key, value);
-    });
-
+    Object.entries(activeTheme.vars).forEach(([key, value]) => root.style.setProperty(key, value));
     let fontLink = document.getElementById('theme-google-font') as HTMLLinkElement;
     if (activeTheme.googleFontUrl) {
       if (!fontLink) {
@@ -121,173 +168,158 @@ export default function App() {
     }
   }, [activeTheme]);
 
-  // 1. Fetch Data
+  // Fetch draw history
   useEffect(() => {
     setIsLoading(true);
-    const targetUrl = activeGame === 'powerball'
-      ? '/api/texas/export/sites/lottery/Games/Powerball/Winning_Numbers/powerball.csv'
-      : '/api/texas/export/sites/lottery/Games/Mega_Millions/Winning_Numbers/megamillions.csv';
-
-    fetch(targetUrl)
-      .then(res => res.text())
-      .then(csvText => {
-        const lines = csvText.trim().split('\n');
-        const parsedData: DrawRecord[] = [];
-
-        for (let i = 0; i < lines.length; i++) {
-          const cols = lines[i].split(',').map(c => c.trim().replace(/"/g, ''));
-
-          // Texas CSV: GameName, Month, Day, Year, Num1, Num2, Num3, Num4, Num5, SpecialBall, Multiplier
-          if (cols.length >= 10 && cols[0].toLowerCase().includes(activeGame === 'powerball' ? 'powerball' : 'mega millions')) {
-            const [_gameName, m, d, y, n1, n2, n3, n4, n5, special, multiplier] = cols;
-
-            const draw_date = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}T00:00:00.000`;
-            const winning_numbers = `${n1} ${n2} ${n3} ${n4} ${n5} ${special}`;
-
-            parsedData.push({
-              draw_date,
-              winning_numbers,
-              multiplier: multiplier || '',
-              mega_ball: special
-            });
+    const cfg = GAME_CONFIGS[activeGame];
+    fetch(cfg.csvPath)
+      .then(r => r.text())
+      .then(csv => {
+        const lines = csv.trim().split('\n');
+        const parsed: DrawRecord[] = [];
+        for (const line of lines) {
+          const cols = line.split(',').map(c => c.trim().replace(/"/g, ''));
+          if (!cols[0].toLowerCase().includes(cfg.csvGameFilter)) continue;
+          if (activeGame === 'texaslotto') {
+            if (cols.length >= 10) {
+              const [, m, d, y, n1, n2, n3, n4, n5, n6] = cols;
+              parsed.push({
+                draw_date: `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}T00:00:00.000`,
+                winning_numbers: `${n1} ${n2} ${n3} ${n4} ${n5} ${n6}`,
+              });
+            }
+          } else {
+            if (cols.length >= 10) {
+              const [, m, d, y, n1, n2, n3, n4, n5, special, multiplier] = cols;
+              parsed.push({
+                draw_date: `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}T00:00:00.000`,
+                winning_numbers: `${n1} ${n2} ${n3} ${n4} ${n5}`,
+                mega_ball: special,
+                multiplier: multiplier || '',
+              });
+            }
           }
         }
-
-        // Texas CSV is oldest first. Reverse so newest dates are at the top (index 0).
-        parsedData.reverse();
-
-        setRawData(parsedData);
+        parsed.reverse(); // newest first
+        setRawData(parsed);
         setIsLoading(false);
       })
-      .catch(err => {
-        console.error("API Error", err);
-        setIsLoading(false);
-      });
+      .catch(() => setIsLoading(false));
   }, [activeGame]);
 
-  // 2. Analytics 
+  // Frequency analysis (display only — not used in generation)
   const analysis = useMemo(() => {
     if (!rawData.length) return null;
-
-    const maxPrimary = activeGame === 'powerball' ? PB_MAX : MM_MAX;
-    const totals = Array.from({ length: maxPrimary + 1 }, () => 0);
+    const cfg = GAME_CONFIGS[activeGame];
+    const totals = Array.from({ length: cfg.maxPrimary + 1 }, () => 0);
     let drawCount = 0;
-
-    rawData.forEach(draw => {
-      if (!draw.winning_numbers) return;
+    for (const draw of rawData) {
+      if (!draw.winning_numbers) continue;
       const nums = draw.winning_numbers.trim().split(/\s+/).map(n => parseInt(n, 10)).filter(n => !isNaN(n));
-
-      // Standardize format (Mega millions puts mega ball in a separate column sometimes, sometimes combined)
-      // Usually first 5 are primary.
-      for (let i = 0; i < 5; i++) {
-        if (nums[i] && nums[i] <= maxPrimary) {
-          totals[nums[i]]++;
-        }
+      for (let i = 0; i < cfg.ballCount; i++) {
+        if (nums[i] >= 1 && nums[i] <= cfg.maxPrimary) totals[nums[i]]++;
       }
       drawCount++;
-    });
-
-    const expectedPerNumber = (drawCount * 5) / maxPrimary;
-
-    const mapped: AnalyzedNumber[] = [];
-    for (let i = 1; i <= maxPrimary; i++) {
-      mapped.push({
-        num: i,
-        count: totals[i],
-        expected: expectedPerNumber,
-        variance: totals[i] - expectedPerNumber
-      });
     }
-
-    // Sort by variance
+    const expectedPerNumber = (drawCount * cfg.ballCount) / cfg.maxPrimary;
+    const mapped: AnalyzedNumber[] = [];
+    for (let i = 1; i <= cfg.maxPrimary; i++) {
+      mapped.push({ num: i, count: totals[i], expected: expectedPerNumber, variance: totals[i] - expectedPerNumber });
+    }
     mapped.sort((a, b) => b.variance - a.variance);
-
     return {
-      hot: mapped.slice(0, 10),
-      cold: [...mapped].sort((a, b) => a.variance - b.variance).slice(0, 10),
       all: mapped,
+      topFreq: mapped[0],
+      bottomFreq: mapped[mapped.length - 1],
       expected: expectedPerNumber,
-      totalDrawsAnalyzed: drawCount
+      totalDrawsAnalyzed: drawCount,
     };
   }, [rawData, activeGame]);
 
-  // 3. Generation Logic
+  // Pick generation
   const generatePick = useCallback(() => {
-    if (!analysis || !rawData.length) return;
-
-    const maxPrimary = activeGame === 'powerball' ? PB_MAX : MM_MAX;
-    const maxSpecial = activeGame === 'powerball' ? PB_SPECIAL_MAX : MM_SPECIAL_MAX;
-
-    const recentDrawStr = rawData[0].winning_numbers + rawData[0].draw_date;
-    const seed = cyrb128(recentDrawStr + Date.now().toString());
-    const rand = sfc32(seed[0], seed[1], seed[2], seed[3]);
-
+    if (!rawData.length) return;
+    const cfg = GAME_CONFIGS[activeGame];
+    const { rand, entropyHex } = makeCryptoRand();
     const generatedPicks: GeneratedPick[] = [];
 
-    // Loop through how many tickets the user asked for
+    const pickFrom = (pool: Set<number>, min: number, max: number): number => {
+      let n: number;
+      let attempts = 0;
+      do {
+        n = Math.floor(rand() * (max - min + 1)) + min;
+        if (++attempts > 100) {
+          for (let i = min; i <= max; i++) if (!pool.has(i)) return i;
+          for (let i = 1; i <= cfg.maxPrimary; i++) if (!pool.has(i)) return i;
+          return min;
+        }
+      } while (pool.has(n));
+      return n;
+    };
+
     for (let t = 0; t < ticketCount; t++) {
-      const primaryPool = new Set<number>();
+      const pool = new Set<number>();
       const justifications: PickJustification[] = [];
 
-      // Helper to get random available num
-      const getRandNum = (min: number, max: number) => {
-        let n;
-        do {
-          n = Math.floor(rand() * (max - min + 1)) + min;
-        } while (primaryPool.has(n));
-        return n;
-      };
-
       if (engineMode === 'hybrid') {
-        const n1 = getRandNum(HUMAN_BIRTHDAY_CUTOFF + 1, maxPrimary);
-        primaryPool.add(n1);
-        justifications.push({ num: n1, tag: 'theory', reason: `Aims to lower split-jackpot odds by picking > 31.` });
-
-        let n2 = analysis.cold[Math.floor(rand() * 5)].num;
-        while (primaryPool.has(n2)) { n2 = analysis.cold[Math.floor(rand() * analysis.cold.length)].num; }
-        primaryPool.add(n2);
-        justifications.push({ num: n2, tag: 'cold', reason: `"Cold" Number: Due to revert to average.` });
-
-        let n3 = analysis.hot[Math.floor(rand() * 5)].num;
-        while (primaryPool.has(n3)) { n3 = analysis.hot[Math.floor(rand() * analysis.hot.length)].num; }
-        primaryPool.add(n3);
-        justifications.push({ num: n3, tag: 'hot', reason: `"Hot" Number: Currently drawn very often.` });
-
-        const n4 = getRandNum(1, maxPrimary);
-        primaryPool.add(n4);
-        justifications.push({ num: n4, tag: 'chaos', reason: `Generated using exact timing of last drawing.` });
-
-        const n5 = getRandNum(1, maxPrimary);
-        primaryPool.add(n5);
-        justifications.push({ num: n5, tag: 'chaos', reason: `Generated using exact timing of last drawing.` });
-
+        // Upper-range picks (avoid birthday-biased numbers 1–31)
+        const upperCount = cfg.ballCount === 6 ? 3 : 2;
+        for (let i = 0; i < upperCount; i++) {
+          const n = pickFrom(pool, cfg.upperRangeMin, cfg.maxPrimary);
+          pool.add(n);
+          justifications.push({ num: n, tag: 'theory', reason: `Avoids 1–${HUMAN_BIRTHDAY_CUTOFF} (birthday-biased). Reduces jackpot splits.` });
+        }
+        // Remaining picks: full-range cryptographic random
+        while (pool.size < cfg.ballCount) {
+          const n = pickFrom(pool, 1, cfg.maxPrimary);
+          pool.add(n);
+          justifications.push({ num: n, tag: 'chaos', reason: 'Cryptographically random. Full-range selection.' });
+        }
       } else {
-        for (let i = 0; i < 5; i++) {
-          const n = getRandNum(HUMAN_BIRTHDAY_CUTOFF + 1, maxPrimary);
-          primaryPool.add(n);
-          justifications.push({ num: n, tag: 'theory', reason: `Anti-Collision: Completely avoids common birthdays.` });
+        // Pure math: all picks from upper range
+        while (pool.size < cfg.ballCount) {
+          const n = pickFrom(pool, cfg.upperRangeMin, cfg.maxPrimary);
+          pool.add(n);
+          justifications.push({ num: n, tag: 'theory', reason: `Anti-Collision: All numbers ≥${cfg.upperRangeMin}.` });
         }
       }
 
-      const primaryArr = Array.from(primaryPool).sort((a, b) => a - b);
-      const specialBall = Math.floor(rand() * maxSpecial) + 1;
+      const primary = Array.from(pool).sort((a, b) => a - b);
 
-      generatedPicks.push({
-        id: `tkt-${t}-${Date.now()}`,
-        primary: primaryArr,
-        special: specialBall,
-        justifications
-      });
+      // Special ball: bias upper half (months 1–12 are heavily picked; upper half reduces splits)
+      let special: number | null = null;
+      if (cfg.maxSpecial !== null) {
+        const upperMin = Math.ceil(cfg.maxSpecial / 2) + 1; // 13 for MM(25) and PB(26)
+        special = rand() < 0.65
+          ? Math.floor(rand() * (cfg.maxSpecial - upperMin + 1)) + upperMin
+          : Math.floor(rand() * cfg.maxSpecial) + 1;
+      }
+
+      generatedPicks.push({ id: `t${t}-${Date.now()}`, primary, special, justifications });
     }
 
-    setCurrentSession({
+    const newSession: GenerationSession = {
       game: activeGame,
       timestamp: new Date().toLocaleTimeString(),
-      seedEntropy: seed.map(s => s.toString(16)).join('-').substring(0, 16).toUpperCase(),
-      picks: generatedPicks
-    });
+      seedEntropy: entropyHex,
+      picks: generatedPicks,
+    };
 
-  }, [analysis, rawData, activeGame, engineMode, ticketCount]);
+    setCurrentSession(newSession);
+    setSavedSessions(prev => {
+      const updated = [newSession, ...prev].slice(0, 10);
+      try { localStorage.setItem('megabucks_sessions', JSON.stringify(updated)); } catch { /* quota exceeded */ }
+      return updated;
+    });
+  }, [rawData, activeGame, engineMode, ticketCount]);
+
+  const switchGame = (g: GameType) => { setActiveGame(g); setCurrentSession(null); };
+
+  // EV indicator
+  const jackpotMillions = parseFloat(jackpots[activeGame]) || 0;
+  const currentEV = computeEV(jackpotMillions, activeGame);
+  const evColor = currentEV >= 0 ? '#00ff88' : currentEV >= -0.50 ? '#ffcc00' : '#ff4466';
+  const evLabel = currentEV >= 0 ? 'POSITIVE EV' : currentEV >= -0.50 ? 'NEAR BREAKEVEN' : 'NEGATIVE EV';
 
   return (
     <div className="terminal-shell">
@@ -312,47 +344,47 @@ export default function App() {
             <select
               value={activeTheme.id}
               onChange={(e) => setActiveTheme(themes.find(t => t.id === e.target.value) || themes[0])}
-              style={{
-                width: '100%',
-                padding: '12px',
-                background: 'var(--bg-color)',
-                color: 'var(--text-main)',
-                border: '1px solid var(--panel-border)',
-                borderRadius: 'var(--radius)',
-                fontFamily: 'var(--font-sans)',
-                fontSize: '0.9rem',
-                cursor: 'pointer',
-                outline: 'none'
-              }}
+              style={{ width: '100%', padding: '12px', background: 'var(--bg-color)', color: 'var(--text-main)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius)', fontFamily: 'var(--font-sans)', fontSize: '0.9rem', cursor: 'pointer', outline: 'none' }}
             >
               <optgroup label="Core Aesthetics">
-                {themes.slice(0, 10).map(theme => (
-                  <option key={theme.id} value={theme.id}>{theme.name}</option>
-                ))}
+                {themes.slice(0, 10).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
               </optgroup>
               <optgroup label="Mass Appeal Aesthetics">
-                {themes.slice(10).map(theme => (
-                  <option key={theme.id} value={theme.id}>{theme.name}</option>
-                ))}
+                {themes.slice(10).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
               </optgroup>
             </select>
           </div>
 
           <div className="panel-section">
             <div className="panel-title">{activeTheme.vectorLabel || 'Target Vector'}</div>
-            <div className="game-switch">
-              <button
-                className={`game-btn ${activeGame === 'powerball' ? 'active-pb' : ''}`}
-                onClick={() => { setActiveGame('powerball'); setCurrentSession(null); }}
-              >
-                POWERBALL
-              </button>
-              <button
-                className={`game-btn ${activeGame === 'megamillions' ? 'active-mm' : ''}`}
-                onClick={() => { setActiveGame('megamillions'); setCurrentSession(null); }}
-              >
-                MEGA MILLIONS
-              </button>
+            <div className="game-switch" style={{ flexDirection: 'column' }}>
+              <button className={`game-btn ${activeGame === 'powerball' ? 'active-pb' : ''}`} onClick={() => switchGame('powerball')}>POWERBALL</button>
+              <button className={`game-btn ${activeGame === 'megamillions' ? 'active-mm' : ''}`} onClick={() => switchGame('megamillions')}>MEGA MILLIONS</button>
+              <button className={`game-btn ${activeGame === 'texaslotto' ? 'active-tx' : ''}`} onClick={() => switchGame('texaslotto')}>TX LOTTO</button>
+            </div>
+          </div>
+
+          <div className="panel-section">
+            <div className="panel-title">Current Jackpot</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>$</span>
+              <input
+                type="number"
+                placeholder="0"
+                min="0"
+                value={jackpots[activeGame]}
+                onChange={e => setJackpots(prev => ({ ...prev, [activeGame]: e.target.value }))}
+                style={{ flex: 1, padding: '8px', background: 'var(--bg-color)', color: 'var(--text-main)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius)', fontFamily: 'var(--font-mono)', fontSize: '0.9rem', outline: 'none' }}
+              />
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>M</span>
+            </div>
+            {jackpotMillions > 0 && (
+              <div style={{ marginTop: '8px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: evColor, padding: '4px 8px', border: `1px solid ${evColor}`, borderRadius: '4px', display: 'inline-block' }}>
+                {evLabel} · ${currentEV.toFixed(2)}/ticket
+              </div>
+            )}
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '4px', lineHeight: 1.4 }}>
+              Lump sum · 37% fed tax · TX resident (approx.)
             </div>
           </div>
 
@@ -363,31 +395,23 @@ export default function App() {
               className="ticket-slider"
               min="1" max="5"
               value={ticketCount}
-              onChange={(e) => setTicketCount(parseInt(e.target.value))}
+              onChange={e => setTicketCount(parseInt(e.target.value))}
               style={{ width: '100%', accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
             />
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-              <span>1</span>
-              <span>3</span>
-              <span>5</span>
+              <span>1</span><span>3</span><span>5</span>
             </div>
           </div>
 
           <div className="panel-section">
             <div className="panel-title">Algorithm Synthesis</div>
-
             <div className={`engine-toggle ${engineMode === 'hybrid' ? 'active' : ''}`} onClick={() => setEngineMode('hybrid')}>
               <div className="engine-icon">⚛</div>
               <div className="engine-info">
-                <div className="engine-name">
-                  HYBRID CHAOS
-                </div>
-                <div className="engine-desc">
-                  Mixes math to find "Hot/Cold" streaks, uses timestamps for random seeds, and avoids popular numbers.
-                </div>
+                <div className="engine-name">HYBRID CHAOS</div>
+                <div className="engine-desc">Mixes upper-range theory picks with cryptographically random selections. Avoids birthday-biased numbers.</div>
               </div>
             </div>
-
             <div className={`engine-toggle ${engineMode === 'pure_math' ? 'active' : ''}`} onClick={() => setEngineMode('pure_math')}>
               <div className="engine-icon">ƒ(x)</div>
               <div className="engine-info">
@@ -396,7 +420,7 @@ export default function App() {
                     <span style={{ borderBottom: '1px dotted var(--accent-magenta)', cursor: 'help' }}>MAXIMUM EV</span>
                   </Tooltip>
                 </div>
-                <div className="engine-desc">Pure math. Forces all numbers above 31 to completely guarantee you don't share the jackpot with someone playing a birthday.</div>
+                <div className="engine-desc">Pure math. Forces all numbers above {HUMAN_BIRTHDAY_CUTOFF} to minimize jackpot splitting with birthday pickers.</div>
               </div>
             </div>
           </div>
@@ -404,9 +428,9 @@ export default function App() {
           <div className="panel-section">
             <div className="panel-title">System Manual</div>
             <button
-              className={`action-btn`}
+              className="action-btn"
               style={{ background: currentView === 'theory' ? 'var(--accent-magenta)' : 'transparent', color: currentView === 'theory' ? 'white' : 'var(--text-muted)', border: '1px solid var(--panel-border)', padding: '12px', marginTop: '0' }}
-              onClick={() => setCurrentView(currentView === 'theory' ? 'terminal' : 'theory')}
+              onClick={() => setCurrentView(v => v === 'theory' ? 'terminal' : 'theory')}
             >
               {currentView === 'theory' ? 'RETURN TO TERMINAL' : 'THEORY & METRICS'}
             </button>
@@ -419,11 +443,10 @@ export default function App() {
         </aside>
 
         <main className="terminal-workspace">
-
           {currentView === 'theory' ? (
             <Theory />
           ) : isLoading && !analysis ? (
-            <div style={{ height: "100%", display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <div className="glitch-loader">ACQUIRING {activeGame.toUpperCase()} DATA MANIFOLD...</div>
             </div>
           ) : (
@@ -432,7 +455,7 @@ export default function App() {
                 <div className="ticket-display">
                   <div className="ticket-meta">
                     <span>{currentSession.timestamp}</span>
-                    <Tooltip text="The exact hash sequence used to mathematically scramble your tickets based on the last real-world drawing.">
+                    <Tooltip text="Cryptographically random 128-bit seed from crypto.getRandomValues(). Unpredictable and unreproducible.">
                       <span style={{ cursor: 'help' }}>ENTROPY_SEED: [{currentSession.seedEntropy}]</span>
                     </Tooltip>
                   </div>
@@ -441,18 +464,18 @@ export default function App() {
                     {currentSession.picks.map((pick, index) => (
                       <div key={pick.id} className="single-ticket-wrap" style={{ borderBottom: index < currentSession.picks.length - 1 ? '1px dashed var(--panel-border)' : 'none', paddingBottom: index < currentSession.picks.length - 1 ? '24px' : '0' }}>
                         <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '8px' }}>ENTRY #{index + 1}</div>
-
                         <div className="ball-container">
                           {pick.primary.map((p, i) => (
                             <div key={`p-${i}`} className="lotto-ball">{p}</div>
                           ))}
-                          <div className={`lotto-ball ${activeGame === 'powerball' ? 'special-pb' : 'special-mm'}`}>
-                            {pick.special}
-                          </div>
+                          {pick.special !== null && (
+                            <div className={`lotto-ball ${activeGame === 'powerball' ? 'special-pb' : 'special-mm'}`}>
+                              {pick.special}
+                            </div>
+                          )}
                         </div>
-
                         <div className="justification-log">
-                          <div className="panel-title" style={{ marginBottom: "8px" }}>Computational Justifications</div>
+                          <div className="panel-title" style={{ marginBottom: '8px' }}>Computational Justifications</div>
                           {pick.justifications.map((j, i) => (
                             <div key={i} className="just-row">
                               <span className="just-num">{j.num}</span>
@@ -467,6 +490,35 @@ export default function App() {
                 </div>
               )}
 
+              {savedSessions.length > 1 && (
+                <div className="panel-section" style={{ marginTop: '16px' }}>
+                  <div className="panel-title">TICKET HISTORY (last {Math.min(savedSessions.length - 1, 9)})</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '220px', overflowY: 'auto' }}>
+                    {savedSessions.slice(1).map((session, idx) => (
+                      <div key={idx} style={{ padding: '8px', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius)', fontSize: '0.78rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-main)' }}>{GAME_CONFIGS[session.game].label}</span>
+                          <span style={{ color: 'var(--text-muted)' }}>{session.timestamp}</span>
+                        </div>
+                        {session.picks.slice(0, 1).map((pick, i) => (
+                          <div key={i} style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
+                            {pick.primary.map((n, j) => (
+                              <span key={j} style={{ background: 'var(--panel-bg)', border: '1px solid var(--panel-border)', borderRadius: '4px', padding: '1px 5px', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>{n}</span>
+                            ))}
+                            {pick.special !== null && (
+                              <span style={{ background: session.game === 'powerball' ? 'rgba(200,0,0,0.2)' : 'rgba(0,60,200,0.2)', border: '1px solid var(--panel-border)', borderRadius: '4px', padding: '1px 5px', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>{pick.special}</span>
+                            )}
+                            {session.picks.length > 1 && (
+                              <span style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>+{session.picks.length - 1}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {analysis && (
                 <div className="stats-grid">
                   <div className="stat-card">
@@ -474,44 +526,41 @@ export default function App() {
                     <div className="stat-val">{analysis.totalDrawsAnalyzed}</div>
                   </div>
                   <div className="stat-card">
-                    <div className="panel-title">Highest Delta (Hot)</div>
-                    <div className="stat-val" style={{ color: "var(--accent-yellow)" }}>
-                      #{analysis.hot[0].num} <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>+{analysis.hot[0].variance.toFixed(1)}</span>
+                    <div className="panel-title">Most Frequent</div>
+                    <div className="stat-val" style={{ color: 'var(--accent-yellow)' }}>
+                      #{analysis.topFreq.num} <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>+{analysis.topFreq.variance.toFixed(1)}</span>
                     </div>
                   </div>
                   <div className="stat-card">
-                    <div className="panel-title">Lowest Delta (Cold)</div>
-                    <div className="stat-val" style={{ color: "var(--accent-green)" }}>
-                      #{analysis.cold[0].num} <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{analysis.cold[0].variance.toFixed(1)}</span>
+                    <div className="panel-title">Least Frequent</div>
+                    <div className="stat-val" style={{ color: 'var(--accent-green)' }}>
+                      #{analysis.bottomFreq.num} <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{analysis.bottomFreq.variance.toFixed(1)}</span>
                     </div>
                   </div>
                 </div>
               )}
 
               {analysis && (
-                <div className="panel-section" style={{ marginTop: "16px" }}>
-                  <div className="panel-title">Phase Space Matrix (Variance Heatmap)</div>
+                <div className="panel-section" style={{ marginTop: '16px' }}>
+                  <div className="panel-title">Historical Frequency (Informational Only)</div>
                   <div className="heatmap">
-                    {analysis.all.sort((a, b) => a.num - b.num).map(a => {
+                    {[...analysis.all].sort((a, b) => a.num - b.num).map(a => {
                       let cellClass = 'heat-cell';
                       if (a.variance > 3) cellClass += ' hot';
                       else if (a.variance < -3) cellClass += ' cold';
                       return (
-                        <div key={a.num} className={cellClass} title={`Variance: ${a.variance.toFixed(2)}`}>
+                        <div key={a.num} className={cellClass} title={`Drawn ${a.count}x · Variance: ${a.variance.toFixed(2)}`}>
                           {a.num}
                         </div>
-                      )
+                      );
                     })}
                   </div>
                 </div>
               )}
-
             </>
           )}
-
         </main>
       </div>
-
     </div>
-  )
+  );
 }

@@ -138,6 +138,12 @@
   font-weight: 700;
 }
 
+.game-btn.active-tx {
+  background: var(--accent-cyan);
+  color: black;
+  font-weight: 700;
+}
+
 /* Generator Options */
 .engine-toggle {
   display: flex;
