@@ -150,6 +150,33 @@ export default function App() {
     } catch { return []; }
   });
 
+  // Fetch current jackpots from Texas Lottery RSS (covers all three games via existing proxy)
+  useEffect(() => {
+    fetch('/api/texas/export/sites/lottery/rss/tlc_latest.xml')
+      .then(r => r.text())
+      .then(xml => {
+        const doc = new DOMParser().parseFromString(xml, 'text/xml');
+        const updates: Partial<Record<GameType, string>> = {};
+        for (const item of Array.from(doc.querySelectorAll('item'))) {
+          const title = item.querySelector('title')?.textContent ?? '';
+          const desc  = item.querySelector('description')?.textContent ?? '';
+          if (!title.toLowerCase().includes('estimated jackpot')) continue;
+          // Parse "Annuitized: $195 Million" or "$1.5 Billion"
+          const m = desc.match(/Annuitized:\s*\$([0-9,.]+)\s*(Million|Billion)/i);
+          if (!m) continue;
+          let amount = parseFloat(m[1].replace(/,/g, ''));
+          if (m[2].toLowerCase() === 'billion') amount *= 1000;
+          const t = title.toLowerCase();
+          if (t.includes('powerball'))       updates.powerball    = amount.toFixed(0);
+          else if (t.includes('mega'))       updates.megamillions = amount.toFixed(0);
+          else if (t.includes('lotto texas') || t.includes('texas lotto'))
+                                             updates.texaslotto   = amount.toFixed(0);
+        }
+        if (Object.keys(updates).length) setJackpots(prev => ({ ...prev, ...updates }));
+      })
+      .catch(() => {}); // silently fail — user can enter manually
+  }, []);
+
   // Apply theme CSS variables
   useEffect(() => {
     const root = document.documentElement;
